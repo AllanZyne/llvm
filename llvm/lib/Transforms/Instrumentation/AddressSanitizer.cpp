@@ -1176,6 +1176,7 @@ AddressSanitizerPass::AddressSanitizerPass(
 
 PreservedAnalyses AddressSanitizerPass::run(Module &M,
                                             ModuleAnalysisManager &MAM) {
+  // M.dump();
   ModuleAddressSanitizer ModuleSanitizer(
       M, Options.InsertVersionCheck, Options.CompileKernel, Options.Recover,
       UseGlobalGC, UseOdrIndicator, DestructorKind, ConstructorKind);
@@ -1183,6 +1184,88 @@ PreservedAnalyses AddressSanitizerPass::run(Module &M,
   auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
   const StackSafetyGlobalInfo *const SSGI =
       ClUseStackSafety ? &MAM.getResult<StackSafetyGlobalAnalysis>(M) : nullptr;
+
+  SmallVector<Function *> SpirKernels;
+  // SmallVector<Function> SpirFuncs;
+  for (Function &F : M) {
+    if (F.getCallingConv() == CallingConv::SPIR_KERNEL) {
+      SpirKernels.emplace_back(&F);
+    }
+  }
+
+  int LongSize = M.getDataLayout().getPointerSizeInBits();
+  auto* IntptrTy = Type::getIntNTy(M.getContext(), LongSize);
+
+  for (auto* F : SpirKernels) {
+    SmallVector<Type *, 16> Types;
+    for (Function::const_arg_iterator I = F->arg_begin(), E = F->arg_end();
+         I != E; ++I) {
+      Types.push_back(I->getType());
+    }
+
+    // New Argument
+    Types.push_back(IntptrTy);
+
+    FunctionType *NewFTy = FunctionType::get(F->getReturnType(), Types, false);
+
+    std::string OrigFuncName = F->getName().str();
+    F->setName(OrigFuncName + "_del");
+
+    Function *NewF =
+        Function::Create(NewFTy, F->getLinkage(), OrigFuncName, F->getParent());
+    NewF->copyAttributesFrom(F);
+    NewF->copyMetadata(F, 0);
+    NewF->setCallingConv(F->getCallingConv());
+    NewF->setDSOLocal(F->isDSOLocal());
+
+    // Set original arguments' names.
+    Function::arg_iterator NewI = NewF->arg_begin();
+    for (Function::const_arg_iterator I = F->arg_begin(), E = F->arg_end();
+         I != E; ++I, ++NewI) {
+      NewI->setName(I->getName());
+    }
+
+    NewF->splice(NewF->begin(), F);
+    assert(F->isDeclaration() &&
+           "splice does not work, original function body is not empty!");
+
+    NewF->setSubprogram(F->getSubprogram());
+
+    NewF->setComdat(F->getComdat());
+    F->setComdat(nullptr);
+
+    F->deleteBody();
+
+    for (Function::arg_iterator I = F->arg_begin(), E = F->arg_end(),
+                                NI = NewF->arg_begin();
+         I != E; ++I, ++NI) {
+      I->replaceAllUsesWith(&*NI);
+    }
+
+    // Fixup metadata
+     IRBuilder<> Builder(M.getContext());
+
+    auto FixupMetadata = [&NewF](StringRef MDName, Constant* NewV) {
+      auto *Node = NewF->getMetadata(MDName);
+      if (!Node)
+        return;
+      SmallVector<Metadata *, 8> NewMD;
+      for (unsigned I = 0; I < Node->getNumOperands(); ++I) {
+        NewMD.emplace_back(Node->getOperand(I));
+      }
+      NewMD.emplace_back(ConstantAsMetadata::get(NewV));
+      NewF->setMetadata(MDName, llvm::MDNode::get(NewF->getContext(), NewMD));
+    };
+
+    FixupMetadata("kernel_arg_buffer_location", Builder.getInt32(-1));
+    FixupMetadata("kernel_arg_runtime_aligned", Builder.getFalse());
+    FixupMetadata("kernel_arg_exclusive_ptr", Builder.getFalse());
+
+    F->removeFromParent();
+  }
+
+  M.dump();
+
   for (Function &F : M) {
     AddressSanitizer FunctionSanitizer(
         M, SSGI, Options.InstrumentationWithCallsThreshold,
@@ -1312,6 +1395,10 @@ static void AppendDebugInfoToArgs(Instruction *InsertBefore, Value *Addr,
   auto *FuncNameGV = GetOrCreateGlobalString(*M, "__asan_func",
                                              demangle(FuncName), ConstantAS);
   Args.push_back(ConstantExpr::getPointerCast(FuncNameGV, I8PtrTy));
+
+  // Launch Data
+  auto* F = InsertBefore->getFunction();
+  Args.push_back(F->getArg(F->arg_size() - 1));
 }
 
 Value *AddressSanitizer::memToShadow(Value *Shadow, IRBuilder<> &IRB) {
@@ -1374,11 +1461,13 @@ void AddressSanitizer::instrumentSyclAllocateLocalMemory(CallInst *CI) {
       IRB.CreateCall(CI->getCalledFunction(),
                      {SizeWithRedZone, ConstantInt::get(IntptrTy, Align)});
 
+  auto* F = CI->getFunction();
+
   /// __asan_set_shadow_local_memory(uptr beg, size_t size, size_t
-  /// size_with_redzone)
+  /// size_with_redzone, launch_info)
   IRB.CreateCall(
       AsanSetShadowDeviceLocalFunc,
-      {IRB.CreatePointerCast(NewCI, IntptrTy), Size, SizeWithRedZone});
+      {IRB.CreatePointerCast(NewCI, IntptrTy), Size, SizeWithRedZone, F->getArg(F->arg_size() - 1)});
 
   CI->replaceAllUsesWith(NewCI);
   CI->eraseFromParent();
@@ -2841,8 +2930,7 @@ void AddressSanitizer::initializeCallbacks(Module &M, const TargetLibraryInfo *T
         }
       }
 
-      // Extend __asan_load/store arguments: unsigned int address_space, char*
-      // file, unsigned int line, char* func
+      // Extend __asan_load/store(unsigned int address_space, char* file, unsigned int line, char* func, void* launch_data)
       if (TargetTriple.isSPIR()) {
         constexpr unsigned ConstantAS = 2;
         auto *Int8PtrTy = Type::getInt8Ty(*C)->getPointerTo(ConstantAS);
@@ -2851,11 +2939,13 @@ void AddressSanitizer::initializeCallbacks(Module &M, const TargetLibraryInfo *T
         Args1.push_back(Int8PtrTy);            // file
         Args1.push_back(Type::getInt32Ty(*C)); // line
         Args1.push_back(Int8PtrTy);            // func
+        Args1.push_back(IntptrTy); // launch_data
 
         Args2.push_back(Type::getInt32Ty(*C)); // address_space
         Args2.push_back(Int8PtrTy);            // file
         Args2.push_back(Type::getInt32Ty(*C)); // line
         Args2.push_back(Int8PtrTy);            // func
+        Args2.push_back(IntptrTy); // launch_data
       }
       AsanErrorCallbackSized[AccessIsWrite][Exp] = M.getOrInsertFunction(
           kAsanReportErrorTemplate + ExpStr + TypeStr + "_n" + EndingStr,
@@ -2930,7 +3020,7 @@ void AddressSanitizer::initializeCallbacks(Module &M, const TargetLibraryInfo *T
 
     AsanSetShadowDeviceLocalFunc =
         M.getOrInsertFunction("__asan_set_shadow_local_memory", IRB.getVoidTy(),
-                              IntptrTy, IntptrTy, IntptrTy);
+                              IntptrTy, IntptrTy, IntptrTy, IntptrTy);
   }
 
   AMDGPUAddressShared =
