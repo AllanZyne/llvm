@@ -56,14 +56,14 @@ endif()
 if(SYCL_PI_UR_USE_FETCH_CONTENT)
   include(FetchContent)
 
-  set(UNIFIED_RUNTIME_REPO "https://github.com/oneapi-src/unified-runtime")
-  # commit c6b0a240c40dd385631d03315f3b9d020bf31e3a
-  # Merge: 5d5c8106 0631330a
-  # Author: Piotr Balcer <piotr.balcer@intel.com>
-  # Date:   Thu Feb 1 10:47:43 2024 +0100
-  #     Merge pull request #1210 from AllanZyne/sanitizer-pr-cpu-local
-  #     [DeviceSanitizer] Support detecting out-of-bounds error on CPU Device & Static Local Memory
-  set(UNIFIED_RUNTIME_TAG c6b0a240c40dd385631d03315f3b9d020bf31e3a)
+  set(UNIFIED_RUNTIME_REPO "https://github.com/oneapi-src/unified-runtime.git")
+  # commit cd97e172cbbfc411fccb0b80e0fff6f9126574f4
+  # Merge: bd745d10 2a9ded6f
+  # Author: Kenneth Benzie (Benie) <k.benzie@codeplay.com>
+  # Date:   Fri Feb 2 14:24:16 2024 +0000
+  #     Merge pull request #1249 from GeorgeWeb/georgi/hip_memadvise_coarse_grained
+  #     [HIP] Implement coarse-grained memory advice for the HIP adapter
+  set(UNIFIED_RUNTIME_TAG cd97e172cbbfc411fccb0b80e0fff6f9126574f4)
 
   if(SYCL_PI_UR_OVERRIDE_FETCH_CONTENT_REPO)
     set(UNIFIED_RUNTIME_REPO "${SYCL_PI_UR_OVERRIDE_FETCH_CONTENT_REPO}")
