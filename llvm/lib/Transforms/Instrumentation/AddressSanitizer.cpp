@@ -175,6 +175,8 @@ const char kAsanAllocasUnpoison[] = "__asan_allocas_unpoison";
 
 const char kAMDGPUAddressSharedName[] = "llvm.amdgcn.is.shared";
 const char kAMDGPUAddressPrivateName[] = "llvm.amdgcn.is.private";
+const char kAMDGPUBallotName[] = "llvm.amdgcn.ballot.i64";
+const char kAMDGPUUnreachableName[] = "llvm.amdgcn.unreachable";
 
 // Accesses sizes are powers of two: 1, 2, 4, 8, 16.
 static const size_t kNumberOfAccessSizes = 5;
@@ -215,7 +217,7 @@ static cl::opt<bool> ClInstrumentWrites(
     cl::Hidden, cl::init(true));
 
 static cl::opt<bool>
-    ClUseStackSafety("asan-use-stack-safety", cl::Hidden, cl::init(false),
+    ClUseStackSafety("asan-use-stack-safety", cl::Hidden, cl::init(true),
                      cl::Hidden, cl::desc("Use Stack Safety analysis results"),
                      cl::Optional);
 
@@ -700,6 +702,8 @@ struct AddressSanitizer {
                                        Instruction *InsertBefore, Value *Addr,
                                        uint32_t TypeStoreSize, bool IsWrite,
                                        Value *SizeArgument);
+  Instruction *genAMDGPUReportBlock(IRBuilder<> &IRB, Value *Cond,
+                                    bool Recover);
   void instrumentUnusualSizeOrAlignment(Instruction *I,
                                         Instruction *InsertBefore, Value *Addr,
                                         TypeSize TypeStoreSize, bool IsWrite,
@@ -725,6 +729,12 @@ struct AddressSanitizer {
   bool maybeInsertDynamicShadowAtFunctionEntry(Function &F);
   void markEscapedLocalAllocas(Function &F);
   void instrumentSyclAllocateLocalMemory(CallInst *CI);
+
+  GlobalVariable *GetOrCreateGlobalString(Module &M, StringRef Name,
+                                          StringRef Value,
+                                          unsigned AddressSpace);
+  void AppendDebugInfoToArgs(Instruction *InsertBefore, Value *Addr,
+                             SmallVectorImpl<Value *> &Args);
 
 private:
   friend struct FunctionStackPoisoner;
@@ -768,9 +778,8 @@ private:
   FunctionCallee AsanPtrCmpFunction, AsanPtrSubFunction;
   FunctionCallee AsanSetShadowDeviceLocalFunc;
   Constant *AsanShadowGlobal;
-  Constant *AsanShadowDeviceGlobal;
-  Constant *AsanShadowDeviceLocal;
   Constant *AsanShadowDevicePrivate;
+  StringMap<GlobalVariable *> GlobalStringMap;
 
   // These arrays is indexed by AccessIsWrite, Experiment and log2(AccessSize).
   FunctionCallee AsanErrorCallback[2][2][kNumberOfAccessSizes];
@@ -1319,59 +1328,45 @@ static bool isUnsupportedAMDGPUAddrspace(Value *Addr) {
   return false;
 }
 
-static bool isUnsupportedSPIRAddrspace(Value *Addr, Function *Func) {
+static bool isUnsupportedSPIRAccess(Value *Addr, Function *Func) {
   Type *PtrTy = cast<PointerType>(Addr->getType()->getScalarType());
-  if (PtrTy->getPointerAddressSpace() != 0) {
-    // Skip SPIR-V built-in varibles
-    StringRef Name;
-    if (auto *CE = dyn_cast<ConstantExpr>(Addr)) {
-      const auto OpCode = CE->getOpcode();
-      if (OpCode == Instruction::GetElementPtr ||
-          OpCode == Instruction::AddrSpaceCast) {
-        Name = CE->getOperand(0)->getName();
-      }
-    } else {
-      Name = Addr->getName();
-    }
-    if (Name.starts_with("__spirv_BuiltIn")) {
-      return true;
-    }
-  } else {
-    // FIXME: Check kernel argments instead of value's name
-    auto Name = Addr->getName();
-    if (Name == "_arg_NumWorkItems" || Name == "_arg_KernelFunc") {
-      return true;
-    }
+  // Private address space: skip kernel arguments
+  if (PtrTy->getPointerAddressSpace() == 0) {
+    return Func->getCallingConv() == CallingConv::SPIR_KERNEL &&
+           isa<Argument>(Addr);
   }
-  return false;
+
+  // All the rest address spaces: skip SPIR-V built-in varibles
+  auto *OrigValue = Addr->stripPointerCasts();
+  return OrigValue->getName().starts_with("__spirv_BuiltIn");
 }
 
-static GlobalVariable *GetOrCreateGlobalString(Module &M, StringRef Name,
-                                               StringRef String,
-                                               unsigned AddressSpace) {
-  static std::unordered_map<std::string, GlobalVariable *> GlobalStringMap;
+GlobalVariable *AddressSanitizer::GetOrCreateGlobalString(
+    Module &M, StringRef Name, StringRef Value, unsigned AddressSpace) {
   GlobalVariable *StringGV = nullptr;
-  if (GlobalStringMap.find(String.str()) != GlobalStringMap.end()) {
-    StringGV = GlobalStringMap[String.str()];
-  } else {
-    auto *Ty =
-        ArrayType::get(Type::getInt8Ty(M.getContext()), String.size() + 1);
-    StringGV = new GlobalVariable(
-        M, Ty, true, GlobalValue::InternalLinkage,
-        ConstantDataArray::getString(M.getContext(), String), Name, nullptr,
-        GlobalValue::NotThreadLocal, AddressSpace);
-    GlobalStringMap[String.str()] = StringGV;
-  }
+  if (GlobalStringMap.find(Value.str()) != GlobalStringMap.end())
+    return GlobalStringMap.at(Value.str());
+
+  auto *Ty = ArrayType::get(Type::getInt8Ty(M.getContext()), Value.size() + 1);
+  StringGV = new GlobalVariable(
+      M, Ty, true, GlobalValue::InternalLinkage,
+      ConstantDataArray::getString(M.getContext(), Value), Name, nullptr,
+      GlobalValue::NotThreadLocal, AddressSpace);
+  GlobalStringMap[Value.str()] = StringGV;
+
   return StringGV;
 }
 
-static void AppendDebugInfoToArgs(Instruction *InsertBefore, Value *Addr,
-                                  SmallVector<Value *> &Args) {
+void AddressSanitizer::AppendDebugInfoToArgs(Instruction *InsertBefore,
+                                             Value *Addr,
+                                             SmallVectorImpl<Value *> &Args) {
   auto *M = InsertBefore->getModule();
   auto &C = InsertBefore->getContext();
   auto &Loc = InsertBefore->getDebugLoc();
+
+  // SPIR constant address space
   constexpr unsigned ConstantAS = 2;
-  auto *I8PtrTy = Type::getInt8Ty(C)->getPointerTo(ConstantAS);
+  PointerType *ConstASPtrTy = Type::getInt8Ty(C)->getPointerTo(ConstantAS);
 
   // Address Space
   Type *PtrTy = cast<PointerType>(Addr->getType()->getScalarType());
@@ -1380,13 +1375,13 @@ static void AppendDebugInfoToArgs(Instruction *InsertBefore, Value *Addr,
 
   // File & Line
   if (Loc) {
-    auto FileName = Loc->getFilename();
+    StringRef FileName = Loc->getFilename();
     auto *FileNameGV =
         GetOrCreateGlobalString(*M, "__asan_file", FileName, ConstantAS);
-    Args.push_back(ConstantExpr::getPointerCast(FileNameGV, I8PtrTy));
+    Args.push_back(ConstantExpr::getPointerCast(FileNameGV, ConstASPtrTy));
     Args.push_back(ConstantInt::get(Type::getInt32Ty(C), Loc.getLine()));
   } else {
-    Args.push_back(ConstantPointerNull::get(I8PtrTy));
+    Args.push_back(ConstantPointerNull::get(ConstASPtrTy));
     Args.push_back(ConstantInt::get(Type::getInt32Ty(C), 0));
   }
 
@@ -1394,7 +1389,7 @@ static void AppendDebugInfoToArgs(Instruction *InsertBefore, Value *Addr,
   auto FuncName = InsertBefore->getFunction()->getName();
   auto *FuncNameGV = GetOrCreateGlobalString(*M, "__asan_func",
                                              demangle(FuncName), ConstantAS);
-  Args.push_back(ConstantExpr::getPointerCast(FuncNameGV, I8PtrTy));
+  Args.push_back(ConstantExpr::getPointerCast(FuncNameGV, ConstASPtrTy));
 
   // Launch Data
   auto* F = InsertBefore->getFunction();
@@ -1478,12 +1473,13 @@ void AddressSanitizer::instrumentMemIntrinsic(MemIntrinsic *MI) {
   InstrumentationIRBuilder IRB(MI);
   if (isa<MemTransferInst>(MI)) {
     IRB.CreateCall(isa<MemMoveInst>(MI) ? AsanMemmove : AsanMemcpy,
-                   {MI->getOperand(0), MI->getOperand(1),
+                   {IRB.CreateAddrSpaceCast(MI->getOperand(0), PtrTy),
+                    IRB.CreateAddrSpaceCast(MI->getOperand(1), PtrTy),
                     IRB.CreateIntCast(MI->getOperand(2), IntptrTy, false)});
   } else if (isa<MemSetInst>(MI)) {
     IRB.CreateCall(
         AsanMemset,
-        {MI->getOperand(0),
+        {IRB.CreateAddrSpaceCast(MI->getOperand(0), PtrTy),
          IRB.CreateIntCast(MI->getOperand(1), IRB.getInt32Ty(), false),
          IRB.CreateIntCast(MI->getOperand(2), IntptrTy, false)});
   }
@@ -1517,17 +1513,17 @@ bool AddressSanitizer::isInterestingAlloca(const AllocaInst &AI) {
 }
 
 bool AddressSanitizer::ignoreAccess(Instruction *Inst, Value *Ptr) {
-  // Instrument accesses from different address spaces only for AMDGPU.
-  Type *PtrTy = cast<PointerType>(Ptr->getType()->getScalarType());
+  // SPIR has its own rules to filter the instrument accesses
   if (TargetTriple.isSPIR()) {
-    // SPIR has its own rules to filter the instrument accesses, it also filters
-    // some AS=0 instructions
-    if (isUnsupportedSPIRAddrspace(Ptr, Inst->getFunction())) {
+    if (isUnsupportedSPIRAccess(Ptr, Inst->getFunction()))
+      return true;
+  } else {
+    // Instrument accesses from different address spaces only for AMDGPU.
+    Type *PtrTy = cast<PointerType>(Ptr->getType()->getScalarType());
+    if (PtrTy->getPointerAddressSpace() != 0 &&
+        !(TargetTriple.isAMDGPU() && !isUnsupportedAMDGPUAddrspace(Ptr))) {
       return true;
     }
-  } else if (PtrTy->getPointerAddressSpace() != 0 &&
-             !(TargetTriple.isAMDGPU() && !isUnsupportedAMDGPUAddrspace(Ptr))) {
-    return true;
   }
 
   // Ignore swifterror addresses.
@@ -1820,8 +1816,7 @@ void AddressSanitizer::instrumentMaskedLoadOrStore(
       InstrumentedAddress = IRB.CreateExtractElement(Addr, Index);
     } else if (Stride) {
       Index = IRB.CreateMul(Index, Stride);
-      Addr = IRB.CreateBitCast(Addr, PointerType::getUnqual(*C));
-      InstrumentedAddress = IRB.CreateGEP(Type::getInt8Ty(*C), Addr, {Index});
+      InstrumentedAddress = IRB.CreatePtrAdd(Addr, Index);
     } else {
       InstrumentedAddress = IRB.CreateGEP(VTy, Addr, {Zero, Index});
     }
@@ -1955,6 +1950,30 @@ Instruction *AddressSanitizer::instrumentAMDGPUAddress(
   return InsertBefore;
 }
 
+Instruction *AddressSanitizer::genAMDGPUReportBlock(IRBuilder<> &IRB,
+                                                    Value *Cond, bool Recover) {
+  Module &M = *IRB.GetInsertBlock()->getModule();
+  Value *ReportCond = Cond;
+  if (!Recover) {
+    auto Ballot = M.getOrInsertFunction(kAMDGPUBallotName, IRB.getInt64Ty(),
+                                        IRB.getInt1Ty());
+    ReportCond = IRB.CreateIsNotNull(IRB.CreateCall(Ballot, {Cond}));
+  }
+
+  auto *Trm =
+      SplitBlockAndInsertIfThen(ReportCond, &*IRB.GetInsertPoint(), false,
+                                MDBuilder(*C).createBranchWeights(1, 100000));
+  Trm->getParent()->setName("asan.report");
+
+  if (Recover)
+    return Trm;
+
+  Trm = SplitBlockAndInsertIfThen(Cond, Trm, false);
+  IRB.SetInsertPoint(Trm);
+  return IRB.CreateCall(
+      M.getOrInsertFunction(kAMDGPUUnreachableName, IRB.getVoidTy()), {});
+}
+
 void AddressSanitizer::instrumentAddress(Instruction *OrigIns,
                                          Instruction *InsertBefore, Value *Addr,
                                          MaybeAlign Alignment,
@@ -1986,7 +2005,7 @@ void AddressSanitizer::instrumentAddress(Instruction *OrigIns,
   if (UseCalls) {
     if (Exp == 0) {
       if (TargetTriple.isSPIR()) {
-        SmallVector<Value *> Args;
+        SmallVector<Value *, 5> Args;
         Args.push_back(AddrLong);
         AppendDebugInfoToArgs(InsertBefore, Addr, Args);
         IRB.CreateCall(AsanMemoryAccessCallback[IsWrite][0][AccessSizeIndex],
@@ -2015,7 +2034,15 @@ void AddressSanitizer::instrumentAddress(Instruction *OrigIns,
   size_t Granularity = 1ULL << Mapping.Scale;
   Instruction *CrashTerm = nullptr;
 
-  if (ClAlwaysSlowPath || (TypeStoreSize < 8 * Granularity)) {
+  bool GenSlowPath = (ClAlwaysSlowPath || (TypeStoreSize < 8 * Granularity));
+
+  if (TargetTriple.isAMDGCN()) {
+    if (GenSlowPath) {
+      auto *Cmp2 = createSlowPathCmp(IRB, AddrLong, ShadowValue, TypeStoreSize);
+      Cmp = IRB.CreateAnd(Cmp, Cmp2);
+    }
+    CrashTerm = genAMDGPUReportBlock(IRB, Cmp, Recover);
+  } else if (GenSlowPath) {
     // We use branch weights for the slow path check, to indicate that the slow
     // path is rarely taken. This seems to be the case for SPEC benchmarks.
     Instruction *CheckTerm = SplitBlockAndInsertIfThen(
@@ -2058,7 +2085,7 @@ void AddressSanitizer::instrumentUnusualSizeOrAlignment(
   if (UseCalls) {
     if (Exp == 0) {
       if (TargetTriple.isSPIR()) {
-        SmallVector<Value *> Args;
+        SmallVector<Value *, 6> Args;
         Args.push_back(AddrLong);
         Args.push_back(Size);
         AppendDebugInfoToArgs(InsertBefore, Addr, Args);
@@ -2293,6 +2320,8 @@ bool ModuleAddressSanitizer::ShouldUseMachOGlobalsSection() const {
   if (TargetTriple.isWatchOS() && !TargetTriple.isOSVersionLT(2))
     return true;
   if (TargetTriple.isDriverKit())
+    return true;
+  if (TargetTriple.isXROS())
     return true;
 
   return false;
@@ -2880,6 +2909,12 @@ bool ModuleAddressSanitizer::instrumentModule(Module &M) {
     }
   }
 
+  // SPIR kernel needn't AsanCtorFunction & AsanDtorFunction
+  if (TargetTriple.isSPIR()) {
+    AsanCtorFunction = nullptr;
+    AsanDtorFunction = nullptr;
+  }
+
   const uint64_t Priority = GetCtorAndDtorPriority(TargetTriple);
 
   // Put the constructor and destructor in comdat if both
@@ -2995,21 +3030,6 @@ void AddressSanitizer::initializeCallbacks(Module &M, const TargetLibraryInfo *T
                                            ArrayType::get(IRB.getInt8Ty(), 0));
 
   if (TargetTriple.isSPIR()) {
-    AsanShadowDeviceGlobal =
-        M.getOrInsertGlobal("__AsanShadowMemoryGlobalStart", IntptrTy, [&] {
-          return new GlobalVariable(M, IntptrTy, true,
-                                    GlobalVariable::ExternalLinkage, nullptr,
-                                    "__AsanShadowMemoryGlobalStart", nullptr,
-                                    GlobalVariable::NotThreadLocal, 1);
-        });
-
-    AsanShadowDeviceLocal =
-        M.getOrInsertGlobal("__AsanShadowMemoryLocalStart", IntptrTy, [&] {
-          return new GlobalVariable(M, IntptrTy, true,
-                                    GlobalVariable::ExternalLinkage, nullptr,
-                                    "__AsanShadowMemoryLocalStart", nullptr,
-                                    GlobalVariable::NotThreadLocal, 1);
-        });
     AsanShadowDevicePrivate =
         M.getOrInsertGlobal("__AsanShadowMemoryPrivateStart", IntptrTy, [&] {
           return new GlobalVariable(M, IntptrTy, true,
@@ -3020,7 +3040,7 @@ void AddressSanitizer::initializeCallbacks(Module &M, const TargetLibraryInfo *T
 
     AsanSetShadowDeviceLocalFunc =
         M.getOrInsertFunction("__asan_set_shadow_local_memory", IRB.getVoidTy(),
-                              IntptrTy, IntptrTy, IntptrTy, IntptrTy);
+                              IntptrTy, IntptrTy, IntptrTy);
   }
 
   AMDGPUAddressShared =
@@ -3037,7 +3057,7 @@ bool AddressSanitizer::maybeInsertAsanInitAtFunctionEntry(Function &F) {
   // the shadow memory.
   // We cannot just ignore these methods, because they may call other
   // instrumented functions.
-  if (F.getName().find(" load]") != std::string::npos) {
+  if (F.getName().contains(" load]")) {
     FunctionCallee AsanInitFunction =
         declareSanitizerInitFunction(*F.getParent(), kAsanInitName, {});
     IRBuilder<> IRB(&F.front(), F.front().begin());
@@ -3117,8 +3137,9 @@ bool AddressSanitizer::instrumentFunction(Function &F,
     return false;
   if (F.getLinkage() == GlobalValue::AvailableExternallyLinkage) return false;
   if (!ClDebugFunc.empty() && ClDebugFunc == F.getName()) return false;
-  if (F.getName().starts_with("__asan_") ||
-      F.getName().contains("__sycl_service_kernel__"))
+  if (F.getName().starts_with("__asan_"))
+    return false;
+  if (F.getName().contains("__sycl_service_kernel__"))
     return false;
 
   bool FunctionModified = false;
@@ -3205,7 +3226,7 @@ bool AddressSanitizer::instrumentFunction(Function &F,
             NoReturnCalls.push_back(CB);
         }
         if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
-          if (TargetTriple.isSPIR() &&
+          if (TargetTriple.isSPIR() && CI->getCalledFunction() &&
               CI->getCalledFunction()->getCallingConv() ==
                   llvm::CallingConv::SPIR_FUNC &&
               CI->getCalledFunction()->getName() ==
@@ -3947,10 +3968,14 @@ bool AddressSanitizer::isSafeAccess(ObjectSizeOffsetVisitor &ObjSizeVis,
     // TODO: We can use vscale_range to convert a scalable value to an
     // upper bound on the access size.
     return false;
-  SizeOffsetType SizeOffset = ObjSizeVis.compute(Addr);
-  if (!ObjSizeVis.bothKnown(SizeOffset)) return false;
-  uint64_t Size = SizeOffset.first.getZExtValue();
-  int64_t Offset = SizeOffset.second.getSExtValue();
+
+  SizeOffsetAPInt SizeOffset = ObjSizeVis.compute(Addr);
+  if (!SizeOffset.bothKnown())
+    return false;
+
+  uint64_t Size = SizeOffset.Size.getZExtValue();
+  int64_t Offset = SizeOffset.Offset.getSExtValue();
+
   // Three checks are required to ensure safety:
   // . Offset >= 0  (since the offset is given from the base ptr)
   // . Size >= Offset  (unsigned)

@@ -1,4 +1,5 @@
-//==-- device-sanitizer-report.hpp - Structure and declaration for assert support --==//
+//==-- device-sanitizer-report.hpp - Structure and declaration for assert
+// support --==//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -7,12 +8,7 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
-// Treat this header as system one to workaround frontend's restriction
-#pragma clang system_header
-
 #include <cinttypes>
-
-#ifdef __SPIR__
 
 enum class DeviceSanitizerErrorType : int32_t {
   UNKNOWN,
@@ -30,6 +26,7 @@ enum class DeviceSanitizerMemoryType : int32_t {
   LOCAL,
   PRIVATE,
   MEM_BUFFER,
+  DEVICE_GLOBAL,
 };
 
 // NOTE Layout of this structure should be aligned with the one in
@@ -57,20 +54,3 @@ struct DeviceSanitizerReport {
 
   bool IsRecover = false;
 };
-
-#ifndef SPIR_GLOBAL_VAR
-#ifdef __SYCL_DEVICE_ONLY__
-#define SPIR_GLOBAL_VAR __attribute__((sycl_global_var))
-#else
-#warning "SPIR_GLOBAL_VAR not defined in host mode. Defining as empty macro."
-#define SPIR_GLOBAL_VAR
-#endif
-#endif
-
-#define __SYCL_GLOBAL__ __attribute__((opencl_global))
-
-// declaration
-extern SPIR_GLOBAL_VAR __SYCL_GLOBAL__ DeviceSanitizerReport
-    __DeviceSanitizerReportMem;
-
-#endif
