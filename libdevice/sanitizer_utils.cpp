@@ -34,6 +34,12 @@ DeviceGlobal<DeviceSanitizerReport> __DeviceSanitizerReportMem;
 
 DeviceGlobal<DeviceType> __DeviceType;
 
+struct LaunchInfo {
+  uptr LocalShadowOffset = 0;
+  uptr LocalShadowOffsetEnd = 0;
+  DeviceSanitizerReport SPIR_DeviceSanitizerReportMem;
+};
+
 #if defined(__SPIR__)
 
 #ifdef __SYCL_DEVICE_ONLY__
