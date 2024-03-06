@@ -57,14 +57,14 @@ if(SYCL_PI_UR_USE_FETCH_CONTENT)
   include(FetchContent)
 
   set(UNIFIED_RUNTIME_REPO "https://github.com/oneapi-src/unified-runtime.git")
-  # commit c0b1f13d94966090a1bb982b3bd747b30b9ef9d3
-  # Merge: 475ce8b4 cf806c37
-  # Author: aarongreig <aaron.greig@codeplay.com>
-  # Date:   Mon Feb 5 13:41:50 2024 +0000
-  #     Merge pull request #1240 from cppchedy/chedy/fix-bi-copy-image
-  #     
-  #     [Bindless][exp] 1D Image copy fix
-  set(UNIFIED_RUNTIME_TAG c0b1f13d94966090a1bb982b3bd747b30b9ef9d3)
+
+  # commit a2757b2931daa2f8d7c9dd51b0fc846be1fd49a7
+  # Merge:  9b936b5 + f78d369
+  # Author: Kenneth Benzie (Benie) <k.benzie@codeplay.com>
+  # Date:   Tue Feb 27 11:34:58 2024 +0000
+  #     Merge pull request #1254 from Bensuo/cmdbuf-support-hip
+  #     [EXP][CMDBUF] HIP adapter support for command buffers
+  set(UNIFIED_RUNTIME_TAG a2757b2931daa2f8d7c9dd51b0fc846be1fd49a7 )
 
   if(SYCL_PI_UR_OVERRIDE_FETCH_CONTENT_REPO)
     set(UNIFIED_RUNTIME_REPO "${SYCL_PI_UR_OVERRIDE_FETCH_CONTENT_REPO}")
@@ -125,7 +125,7 @@ set(UNIFIED_RUNTIME_COMMON_INCLUDE_DIR "${UNIFIED_RUNTIME_SOURCE_DIR}/source/com
 
 add_library(UnifiedRuntimeLoader ALIAS ur_loader)
 add_library(UnifiedRuntimeCommon ALIAS ur_common)
-add_library(UnifiedMallocFramework ALIAS unified_malloc_framework)
+add_library(UnifiedMemoryFramework ALIAS umf)
 
 add_library(UnifiedRuntime-Headers INTERFACE)
 

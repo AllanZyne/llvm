@@ -1,3 +1,14 @@
+<<<<<<< HEAD
+// REQUIRES: linux
+// RUN: %{build} %device_sanitizer_flags -DMALLOC_DEVICE -O1 -g -o %t
+// RUN: %{run} not %t &> %t.txt ; FileCheck --check-prefixes CHECK,CHECK-DEVICE --input-file %t.txt %s
+// RUN: %{build} %device_sanitizer_flags -DMALLOC_DEVICE -O2 -g -o %t
+// RUN: %{run} not %t &> %t.txt ; FileCheck --check-prefixes CHECK,CHECK-DEVICE --input-file %t.txt %s
+// RUN: %{build} %device_sanitizer_flags -DMALLOC_HOST -O2 -g -o %t
+// RUN: %{run} not %t &> %t.txt ; FileCheck --check-prefixes CHECK,CHECK-HOST --input-file %t.txt %s
+// RUN: %{build} %device_sanitizer_flags -DMALLOC_SHARED -O2 -g -o %t
+// RUN: %{run} not %t &> %t.txt ; FileCheck --check-prefixes CHECK,CHECK-SHARED --input-file %t.txt %s
+=======
 // REQUIRES: linux, cpu
 // RUN: %{build} %device_sanitizer_flags -DMALLOC_DEVICE -O1 -g -o %t
 // RUN: env SYCL_PREFER_UR=1 ONEAPI_DEVICE_SELECTOR=opencl:cpu %{run-unfiltered-devices} not %t &> %t.txt ; FileCheck --check-prefixes CHECK,CHECK-DEVICE --input-file %t.txt %s
@@ -7,6 +18,7 @@
 // RUN: env SYCL_PREFER_UR=1 ONEAPI_DEVICE_SELECTOR=opencl:cpu %{run-unfiltered-devices} not %t &> %t.txt ; FileCheck --check-prefixes CHECK,CHECK-HOST --input-file %t.txt %s
 // RUN: %{build} %device_sanitizer_flags -DMALLOC_SHARED -O2 -g -o %t
 // RUN: env SYCL_PREFER_UR=1 ONEAPI_DEVICE_SELECTOR=opencl:cpu %{run-unfiltered-devices} not %t &> %t.txt ; FileCheck --check-prefixes CHECK,CHECK-SHARED --input-file %t.txt %s
+>>>>>>> sycl
 #include <sycl/sycl.hpp>
 
 int main() {
@@ -30,11 +42,19 @@ int main() {
         [=](sycl::nd_item<1> item) { ++array[item.get_global_id(0)]; });
   });
   Q.wait();
+<<<<<<< HEAD
   // CHECK-DEVICE: ERROR: DeviceSanitizer: out-of-bounds-access on USM Device Memory
   // CHECK-HOST:   ERROR: DeviceSanitizer: out-of-bounds-access on USM Host Memory
   // CHECK-SHARED: ERROR: DeviceSanitizer: out-of-bounds-access on USM Shared Memory
   // CHECK: {{READ of size 2 at kernel <.*MyKernelR_4> LID\(0, 0, 0\) GID\(123456789, 0, 0\)}}
+  // CHECK: {{  #0 .* .*parallel_for_short.cpp:}}[[@LINE-8]]
+=======
+  // CHECK-DEVICE: ERROR: DeviceSanitizer: out-of-bounds-access on Device USM
+  // CHECK-HOST:   ERROR: DeviceSanitizer: out-of-bounds-access on Host USM
+  // CHECK-SHARED: ERROR: DeviceSanitizer: out-of-bounds-access on Shared USM
+  // CHECK: {{READ of size 2 at kernel <.*MyKernelR_4> LID\(0, 0, 0\) GID\(123456789, 0, 0\)}}
   // CHECK: {{  #0 .* .*parallel_for_short.cpp:}}[[@LINE-7]]
+>>>>>>> sycl
 
   return 0;
 }

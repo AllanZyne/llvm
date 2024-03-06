@@ -1,6 +1,11 @@
+<<<<<<< HEAD
+// RUN: %{build} %device_sanitizer_flags -g -o %t.out
+// RUN: %{run} not %t.out 2>&1 | FileCheck %s
+=======
 // REQUIRES: linux, cpu
 // RUN: %{build} %device_sanitizer_flags -g -o %t.out
 // RUN: env SYCL_PREFER_UR=1 ONEAPI_DEVICE_SELECTOR=opencl:cpu %{run-unfiltered-devices} not %t.out 2>&1 | FileCheck %s
+>>>>>>> sycl
 #include <sycl/sycl.hpp>
 
 constexpr std::size_t N = 16;
@@ -19,7 +24,11 @@ int main() {
           auto &ref = *ptr;
           ref[item.get_local_linear_id() * 2 + 4] = 42;
           // CHECK: ERROR: DeviceSanitizer: out-of-bounds-access on Local Memory
+<<<<<<< HEAD
+          // CHECK: {{READ of size 1 at kernel <.*MyKernel> LID\(6, 0, 0\) GID\(6, 0, 0\)}}
+=======
           // CHECK: {{WRITE of size 4 at kernel <.*MyKernel> LID\(6, 0, 0\) GID\(.*, 0, 0\)}}
+>>>>>>> sycl
           // CHECK: {{  #0 .* .*local-overflow-1.cpp:}}[[@LINE-3]]
         });
   });

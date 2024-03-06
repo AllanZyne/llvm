@@ -68,6 +68,10 @@ for name in possibly_dangerous_env_vars:
         del llvm_config.config.environment[name]
 
 # Propagate some variables from the host environment.
+<<<<<<< HEAD
+llvm_config.with_system_environment(['PATH', 'OCL_ICD_FILENAMES',
+    'CL_CONFIG_DEVICES', 'SYCL_DEVICE_ALLOWLIST', 'SYCL_CONFIG_FILE_NAME', 'ASAN_OPTIONS'])
+=======
 llvm_config.with_system_environment(
     [
         "PATH",
@@ -77,8 +81,15 @@ llvm_config.with_system_environment(
         "SYCL_CONFIG_FILE_NAME",
     ]
 )
+>>>>>>> sycl
 
 llvm_config.with_environment("PATH", config.lit_tools_dir, append_path=True)
+
+if "cuda:gpu" in config.sycl_devices:
+    llvm_config.with_system_environment("CUDA_PATH")
+
+if "hip:gpu" in config.sycl_devices:
+    llvm_config.with_system_environment("ROCM_PATH")
 
 # Configure LD_LIBRARY_PATH or corresponding os-specific alternatives
 if platform.system() == "Linux":
@@ -669,7 +680,7 @@ for sycl_device in config.sycl_devices:
     features.update(sg_size_features)
 
     be, dev = sycl_device.split(":")
-    features.add(dev.replace("acc", "accelerator"))
+    features.add(dev.replace("fpga", "accelerator"))
     # Use short names for LIT rules.
     features.add(be)
 
@@ -687,6 +698,10 @@ try:
 except ImportError:
     pass
 
+<<<<<<< HEAD
+config.substitutions.append( ('%device_sanitizer_flags', "-fsanitize=address -fsanitize-target=device") )
+=======
 config.substitutions.append(
     ("%device_sanitizer_flags", "-Xsycl-target-frontend -fsanitize=address")
 )
+>>>>>>> sycl
