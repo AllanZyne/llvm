@@ -56,15 +56,77 @@ endif()
 if(SYCL_PI_UR_USE_FETCH_CONTENT)
   include(FetchContent)
 
-  set(UNIFIED_RUNTIME_REPO "https://github.com/oneapi-src/unified-runtime.git")
+  # The fetch_adapter_source function can be used to perform a separate content
+  # fetch for a UR adapter, this allows development of adapters to be decoupled
+  # from each other.
+  #
+  # A separate content fetch will not be performed if:
+  # * The adapter name is not present in the SYCL_ENABLE_PLUGINS variable.
+  # * The repo and tag provided match the values of the
+  #   UNIFIED_RUNTIME_REPO/UNIFIED_RUNTIME_TAG variables
+  #
+  # Args:
+  #   * name - Must be the directory name of the adapter
+  #   * repo - A valid Git URL of a Unified Runtime repo
+  #   * tag - A valid Git branch/tag/commit in the Unified Runtime repo
+  function(fetch_adapter_source name repo tag)
+    if(NOT ${name} IN_LIST SYCL_ENABLE_PLUGINS)
+      return()
+    endif()
+    if(repo STREQUAL UNIFIED_RUNTIME_REPO AND
+        tag STREQUAL UNIFIED_RUNTIME_TAG)
+      return()
+    endif()
+    message(STATUS
+      "Will fetch Unified Runtime ${name} adapter from ${repo} at ${tag}")
+    set(fetch-name unified-runtime-${name})
+    FetchContent_Declare(${fetch-name}
+      GIT_REPOSITORY ${repo} GIT_TAG ${tag})
+    # We don't want to add this repo to the build, only fetch its source.
+    FetchContent_Populate(${fetch-name})
+    # Get the path to the source directory
+    string(TOUPPER ${name} NAME)
+    set(source_dir_var UR_ADAPTER_${NAME}_SOURCE_DIR)
+    FetchContent_GetProperties(${fetch-name} SOURCE_DIR UR_ADAPTER_${NAME}_SOURCE_DIR)
+    # Set the variable which informs UR where to get the adapter source from.
+    set(UR_ADAPTER_${NAME}_SOURCE_DIR
+      "${UR_ADAPTER_${NAME}_SOURCE_DIR}/source/adapters/${name}"
+      CACHE PATH "Path to external '${name}' adapter source dir" FORCE)
+  endfunction()
 
-  # commit a2757b2931daa2f8d7c9dd51b0fc846be1fd49a7
-  # Merge:  9b936b5 + f78d369
-  # Author: Kenneth Benzie (Benie) <k.benzie@codeplay.com>
-  # Date:   Tue Feb 27 11:34:58 2024 +0000
-  #     Merge pull request #1254 from Bensuo/cmdbuf-support-hip
-  #     [EXP][CMDBUF] HIP adapter support for command buffers
-  set(UNIFIED_RUNTIME_TAG a2757b2931daa2f8d7c9dd51b0fc846be1fd49a7 )
+  set(UNIFIED_RUNTIME_REPO "https://github.com/oneapi-src/unified-runtime.git")
+  # commit 003d4da84fd6eda5240c9b90217f8901559a28a4
+  # Merge: e38e79e6 7a5c1ad1
+  # Author: aarongreig <aaron.greig@codeplay.com>
+  # Date:   Wed Apr 17 17:52:21 2024 +0100
+  #    Merge pull request #1402 from AllanZyne/user-after-free
+  #    [DeviceSanitizer] Checking "sycl::free" related errors
+  set(UNIFIED_RUNTIME_TAG 003d4da84fd6eda5240c9b90217f8901559a28a4)
+
+  fetch_adapter_source(level_zero
+    ${UNIFIED_RUNTIME_REPO}
+    ${UNIFIED_RUNTIME_TAG}
+  )
+
+  fetch_adapter_source(opencl
+    ${UNIFIED_RUNTIME_REPO}
+    ${UNIFIED_RUNTIME_TAG}
+  )
+
+  fetch_adapter_source(cuda
+    ${UNIFIED_RUNTIME_REPO}
+    ${UNIFIED_RUNTIME_TAG}
+  )
+
+  fetch_adapter_source(hip
+    ${UNIFIED_RUNTIME_REPO}
+    ${UNIFIED_RUNTIME_TAG}
+  )
+
+  fetch_adapter_source(native_cpu
+    ${UNIFIED_RUNTIME_REPO}
+    ${UNIFIED_RUNTIME_TAG}
+  )
 
   if(SYCL_PI_UR_OVERRIDE_FETCH_CONTENT_REPO)
     set(UNIFIED_RUNTIME_REPO "${SYCL_PI_UR_OVERRIDE_FETCH_CONTENT_REPO}")
